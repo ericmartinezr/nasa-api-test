@@ -8,9 +8,10 @@ from datetime import datetime
 load_dotenv()
 
 # API para Asteroids - NeoWs
-
 URL = "https://api.nasa.gov/neo/rest/v1/feed?start_date={start_date}&end_date={end_date}&api_key={api_key}"
 
+
+# Inicializa SparkSession
 spark = SparkSession.builder.appName("NASA Asteroids").getOrCreate()
 
 
@@ -18,6 +19,7 @@ def just_print_response(response):
     print(response)
 
 
+# Procesa la respuesta de la API y guarda los datos en formato Parquet en la carpeta "bronze" con partición por fecha de procesamiento.
 def silver_response(response):
     asteroids = []
     today = datetime.today().strftime('%Y-%m-%d')
@@ -51,6 +53,8 @@ def silver_response(response):
     )
 
 
+# Procesa los datos de silver y guarda los datos transformados en formato parquet por agregacion
+# Ej: Resumen diario, puntaje de riesgo, etc
 def gold_response(response):
     pass
 
