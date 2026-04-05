@@ -22,8 +22,9 @@ def just_print_response(response):
 
 def bronze_response(response):
     today = datetime.today().strftime('%Y-%m-%d')
-    df = spark.read.json(spark.sparkContext.parallelize(
-        [response["near_earth_objects"]]))
+    # Use json.dumps to ensure valid JSON strings for spark.read.json
+    json_rdd = spark.sparkContext.parallelize([json.dumps(response["near_earth_objects"])])
+    df = spark.read.json(json_rdd)
     df.write.mode("overwrite").parquet(f"bronze/{today}/asteroids.parquet")
 
 
@@ -33,17 +34,19 @@ def silver_response(response):
     # Read from Bronze (following medallion architecture)
     try:
         bronze_df = spark.read.parquet(f"bronze/{today}/asteroids.parquet")
+        # Extract the dictionary back from the single row in the bronze parquet
+        bronze_data = bronze_df.collect()[0].asDict()
     except Exception as e:
         print(f"Error reading bronze data: {e}")
         return
 
-    # In Bronze, each date is a column. We need to unpivot (stack) them.
-    # However, since the API response is already available as a dict in 'response',
-    # we can process it efficiently to create our Silver DataFrame.
-
+    # In Bronze, each date is a column. We process this dictionary to create our Silver DataFrame.
     asteroids = []
-    # If using 'response' directly (more robust in this case):
-    for date_str, asteroid_list in response["near_earth_objects"].items():
+    
+    for date_str, asteroid_list in bronze_data.items():
+        if not asteroid_list: # Skip null columns if any
+            continue
+            
         for asteroid in asteroid_list:
             obj_asteroid = {
                 "name": asteroid["name"],
