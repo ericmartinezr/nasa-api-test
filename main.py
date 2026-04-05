@@ -18,14 +18,31 @@ def silver_response(response):
     for date, asteroid_list in response["near_earth_objects"].items():
         asteroids[date] = []
         for asteroid in asteroid_list:
-            asteroids[date].append({
+            obj_asteroid = {
                 "name": asteroid["name"],
                 "data_date": date,
                 "is_potentially_hazardous": asteroid["is_potentially_hazardous_asteroid"],
                 "estimated_diameter_km_min": asteroid["estimated_diameter"]["kilometers"]["estimated_diameter_min"],
-                "estimated_diameter_km_max": asteroid["estimated_diameter"]["kilometers"]["estimated_diameter_max"]
-            })
+                "estimated_diameter_km_max": asteroid["estimated_diameter"]["kilometers"]["estimated_diameter_max"],
+                "kms_per_second": float(asteroid["close_approach_data"][0]["relative_velocity"]["kilometers_per_second"]),
+                "kms_per_hour": float(asteroid["close_approach_data"][0]["relative_velocity"]["kilometers_per_hour"]),
+                "miss_distance_km": float(asteroid["close_approach_data"][0]["miss_distance"]["kilometers"]),
+            }
+
+            # Derived columns
+            obj_asteroid["estimated_diameter_km_avg"] = (
+                obj_asteroid["estimated_diameter_km_min"] + obj_asteroid["estimated_diameter_km_max"]) / 2
+            obj_asteroid["is_large"] = obj_asteroid["estimated_diameter_km_avg"] > 1
+            obj_asteroid["is_fast"] = float(
+                obj_asteroid["kms_per_second"]) > 10
+
+            asteroids[date].append(obj_asteroid)
+
     print(asteroids)
+
+
+def gold_response(response):
+    pass
 
 
 def main():
