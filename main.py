@@ -1,7 +1,9 @@
 import os
 import requests
+import json
 from dotenv import load_dotenv
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, count, sum, avg, min, year, to_date, lit
 from datetime import datetime
 
 
@@ -11,7 +13,6 @@ load_dotenv()
 URL = "https://api.nasa.gov/neo/rest/v1/feed?start_date={start_date}&end_date={end_date}&api_key={api_key}"
 
 
-# Inicializa SparkSession
 spark = SparkSession.builder.appName("NASA Asteroids").getOrCreate()
 
 
@@ -19,44 +20,97 @@ def just_print_response(response):
     print(response)
 
 
-# Procesa la respuesta de la API y guarda los datos en formato Parquet en la carpeta "bronze" con partición por fecha de procesamiento.
-def silver_response(response):
-    asteroids = []
+def bronze_response(response):
     today = datetime.today().strftime('%Y-%m-%d')
-    for date, asteroid_list in response["near_earth_objects"].items():
+    df = spark.read.json(spark.sparkContext.parallelize(
+        [response["near_earth_objects"]]))
+    df.write.mode("overwrite").parquet(f"bronze/{today}/asteroids.parquet")
+
+
+def silver_response(response):
+    today = datetime.today().strftime('%Y-%m-%d')
+
+    # Read from Bronze (following medallion architecture)
+    try:
+        bronze_df = spark.read.parquet(f"bronze/{today}/asteroids.parquet")
+    except Exception as e:
+        print(f"Error reading bronze data: {e}")
+        return
+
+    # In Bronze, each date is a column. We need to unpivot (stack) them.
+    # However, since the API response is already available as a dict in 'response',
+    # we can process it efficiently to create our Silver DataFrame.
+
+    asteroids = []
+    # If using 'response' directly (more robust in this case):
+    for date_str, asteroid_list in response["near_earth_objects"].items():
         for asteroid in asteroid_list:
             obj_asteroid = {
                 "name": asteroid["name"],
                 "process_date": today,
-                "data_date": date,
-                "is_potentially_hazardous": asteroid["is_potentially_hazardous_asteroid"],
-                "estimated_diameter_km_min": asteroid["estimated_diameter"]["kilometers"]["estimated_diameter_min"],
-                "estimated_diameter_km_max": asteroid["estimated_diameter"]["kilometers"]["estimated_diameter_max"],
-                "kms_per_second": float(asteroid["close_approach_data"][0]["relative_velocity"]["kilometers_per_second"]),
-                "kms_per_hour": float(asteroid["close_approach_data"][0]["relative_velocity"]["kilometers_per_hour"]),
+                "date": date_str,
+                "hazardous": bool(asteroid["is_potentially_hazardous_asteroid"]),
+                "estimated_diameter_km_min": float(asteroid["estimated_diameter"]["kilometers"]["estimated_diameter_min"]),
+                "estimated_diameter_km_max": float(asteroid["estimated_diameter"]["kilometers"]["estimated_diameter_max"]),
+                "velocity_km_s": float(asteroid["close_approach_data"][0]["relative_velocity"]["kilometers_per_second"]),
                 "miss_distance_km": float(asteroid["close_approach_data"][0]["miss_distance"]["kilometers"]),
             }
 
             # Derived columns
-            obj_asteroid["estimated_diameter_km_avg"] = (
+            obj_asteroid["avg_diameter_km"] = (
                 obj_asteroid["estimated_diameter_km_min"] + obj_asteroid["estimated_diameter_km_max"]) / 2
-            obj_asteroid["is_large"] = obj_asteroid["estimated_diameter_km_avg"] > 1
-            obj_asteroid["is_fast"] = float(
-                obj_asteroid["kms_per_second"]) > 10
-
             asteroids.append(obj_asteroid)
 
-    df = spark.createDataFrame(asteroids)
-    df.write.mode("overwrite").parquet(
-        path=f"bronze/{today}/asteroids.parquet",
-        partitionBy=["process_date"]
-    )
+    silver_df = spark.createDataFrame(asteroids)
+
+    # Add year column for Gold layer partitioning
+    silver_df = silver_df.withColumn("year", year(to_date(col("date"))))
+
+    # Write to Silver partitioned by date
+    silver_df.write.mode("overwrite").partitionBy(
+        "date").parquet(f"silver/{today}/asteroids.parquet")
+    print(f"Silver layer written to silver/{today}/asteroids.parquet")
 
 
 # Procesa los datos de silver y guarda los datos transformados en formato parquet por agregacion
 # Ej: Resumen diario, puntaje de riesgo, etc
 def gold_response(response):
-    pass
+    today = datetime.today().strftime('%Y-%m-%d')
+
+    # Read from Silver layer
+    try:
+        silver_df = spark.read.parquet(f"silver/{today}/asteroids.parquet")
+    except Exception as e:
+        print(f"Error reading silver data: {e}")
+        return
+
+    # First aggregation: Daily summary
+    gold_df = silver_df.groupBy("date", "year").agg(
+        count("*").alias("total_asteroids"),
+        sum(col("hazardous").cast("int")).alias("hazardous_count"),
+        avg("velocity_km_s").alias("avg_velocity"),
+        min("miss_distance_km").alias("closest_distance")
+    )
+
+    gold_df.write.mode("overwrite") \
+        .partitionBy("year") \
+        .parquet("gold/asteroid_daily_summary/")
+
+    print("Gold Daily Summary written to gold/asteroid_daily_summary/")
+
+    # Second aggregation: Risk scores
+    gold_risk_df = silver_df.withColumn(
+        "risk_score",
+        col("velocity_km_s") * 0.4 +
+        col("avg_diameter_km") * 0.4 +
+        col("hazardous").cast("int") * 0.2
+    )
+
+    gold_risk_df.write.mode("overwrite") \
+        .partitionBy("date") \
+        .parquet("gold/asteroid_risk_scores/")
+
+    print("Gold Risk Scores written to gold/asteroid_risk_scores/")
 
 
 def main():
@@ -68,7 +122,9 @@ def main():
         response.raise_for_status()
         data = response.json()
 
+        bronze_response(data)
         silver_response(data)
+        gold_response(data)
 
     except Exception as e:
         print(f"An error occurred: {e}")
