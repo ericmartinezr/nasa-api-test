@@ -23,9 +23,10 @@ def just_print_response(response):
 def bronze_response(response):
     today = datetime.today().strftime('%Y-%m-%d')
     # Use json.dumps to ensure valid JSON strings for spark.read.json
-    json_rdd = spark.sparkContext.parallelize([json.dumps(response["near_earth_objects"])])
+    json_data = json.dumps(response["near_earth_objects"], indent=2)
+    json_rdd = spark.sparkContext.parallelize([json_data])
     df = spark.read.json(json_rdd)
-    df.write.mode("overwrite").parquet(f"bronze/{today}/asteroids.parquet")
+    df.write.mode("overwrite").json(f"bronze/{today}/asteroids.json")
 
 
 def silver_response(response):
@@ -33,7 +34,7 @@ def silver_response(response):
 
     # Read from Bronze (following medallion architecture)
     try:
-        bronze_df = spark.read.parquet(f"bronze/{today}/asteroids.parquet")
+        bronze_df = spark.read.json(f"bronze/{today}/asteroids.json")
         # Extract the dictionary back from the single row in the bronze parquet
         bronze_data = bronze_df.collect()[0].asDict()
     except Exception as e:
@@ -42,11 +43,11 @@ def silver_response(response):
 
     # In Bronze, each date is a column. We process this dictionary to create our Silver DataFrame.
     asteroids = []
-    
+
     for date_str, asteroid_list in bronze_data.items():
-        if not asteroid_list: # Skip null columns if any
+        if not asteroid_list:  # Skip null columns if any
             continue
-            
+
         for asteroid in asteroid_list:
             obj_asteroid = {
                 "name": asteroid["name"],
@@ -125,9 +126,9 @@ def main():
         response.raise_for_status()
         data = response.json()
 
-        bronze_response(data)
+        # bronze_response(data)
         silver_response(data)
-        gold_response(data)
+        # gold_response(data)
 
     except Exception as e:
         print(f"An error occurred: {e}")
